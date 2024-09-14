@@ -11,15 +11,18 @@ DB_DATABASE="form"
 
 # Backup directory
 BACKUP_DIR="/mnt/d/BackupData"
+IMAGE_DIR="/path/to/image_directory"
 
 # Create a timestamp
 TIMESTAMP=$(date +"%F_%H-%M-%S")
 
-# Backup file name
-BACKUP_FILE="${DB_DATABASE}_${TIMESTAMP}.sql"
+# Backup file names
+DB_BACKUP_FILE="${DB_DATABASE}_${TIMESTAMP}.sql"
+IMAGE_BACKUP_FILE="images_${TIMESTAMP}.tar.gz"
 
-# Full path for the backup file
-BACKUP_PATH="/tmp/${BACKUP_FILE}"
+# Full paths for the backup files
+DB_BACKUP_PATH="/tmp/${DB_BACKUP_FILE}"
+IMAGE_BACKUP_PATH="/tmp/${IMAGE_BACKUP_FILE}"
 
 # Log file
 LOG_FILE="/tmp/backup_${TIMESTAMP}.log"
@@ -35,81 +38,59 @@ error_exit() {
     exit 1
 }
 
-# Function to store backups in specific directories
-store_backups() {
-    log "Storing backups in specific directories..."
-
-    # Create directories if they don't exist
-    mkdir -p "${BACKUP_DIR}/last_3_days"
-    mkdir -p "${BACKUP_DIR}/7_days"
-    mkdir -p "${BACKUP_DIR}/14_days"
-    mkdir -p "${BACKUP_DIR}/30_days"
-    mkdir -p "${BACKUP_DIR}/180_days"
-
-    # Move backups to specific directories based on their age
-    find "${BACKUP_DIR}" -type f -name "${DB_DATABASE}_*.zip" -exec bash -c '
-        for file; do
-            base=$(basename "$file")
-            date_part=$(echo "$base" | sed -E "s/^.*_([0-9]{4}-[0-9]{2}-[0-9]{2})_.*$/\1/")
-            file_date=$(date -d "$date_part" +%s)
-            now=$(date +%s)
-            days_diff=$(( (now - file_date) / 86400 ))
-
-            if [[ $days_diff -le 3 ]]; then
-                mv "$file" "${BACKUP_DIR}/last_3_days/"
-            elif [[ $days_diff -eq 7 ]]; then
-                mv "$file" "${BACKUP_DIR}/7_days/"
-            elif [[ $days_diff -eq 14 ]]; then
-                mv "$file" "${BACKUP_DIR}/14_days/"
-            elif [[ $days_diff -eq 30 ]]; then
-                mv "$file" "${BACKUP_DIR}/30_days/"
-            elif [[ $days_diff -eq 180 ]]; then
-                mv "$file" "${BACKUP_DIR}/180_days/"
-            fi
-        done
-    ' bash {} +
-}
-
-# Function to remove old backups
+# Function to delete backups older than 7 days
 cleanup_old_backups() {
-    log "Cleaning up old backups..."
+    log "Cleaning up old backups older than 7 days..."
 
-    # Remove backups older than 3 days, except for those on the 7th, 14th, 30th, and 180th day
-    find "${BACKUP_DIR}" -type f -name "${DB_DATABASE}_*.zip" -mtime +3 -exec bash -c '
-        for file; do
-            base=$(basename "$file")
-            date_part=$(echo "$base" | sed -E "s/^.*_([0-9]{4}-[0-9]{2}-[0-9]{2})_.*$/\1/")
-            file_date=$(date -d "$date_part" +%s)
-            now=$(date +%s)
-            days_diff=$(( (now - file_date) / 86400 ))
-
-            if [[ $days_diff -ne 7 && $days_diff -ne 14 && $days_diff -ne 30 && $days_diff -ne 180 ]]; then
-                rm "$file"
-            fi
-        done
-    ' bash {} +
+    # Find and delete backups older than 7 days
+    find "${BACKUP_DIR}" -type f -name "${DB_DATABASE}_*.zip" -mtime +7 -exec rm -f {} \; || error_exit "Failed to clean up old backups"
+    find "${BACKUP_DIR}" -type f -name "images_*.tar.gz" -mtime +7 -exec rm -f {} \; || error_exit "Failed to clean up old image backups"
 }
+
+# Function to delete database data older than 7 days
+delete_old_data() {
+    log "Deleting data older than 7 days from the database..."
+
+    # Get the list of tables
+    tables=$(mysql ${DB_DATABASE} -e "SHOW TABLES;" -s --skip-column-names)
+
+    # Iterate over each table and delete old data
+    for table in $tables; do
+        log "Deleting old data from table $table..."
+        mysql ${DB_DATABASE} -e "
+            DELETE FROM $table WHERE updated_at < NOW() - INTERVAL 7 DAY;
+        " || error_exit "Failed to delete old data from table $table"
+    done
+}
+
+# Delete old data from the database
+delete_old_data
 
 # Dump the database into a SQL file
 log "Starting database backup..."
-mysqldump -h ${DB_HOST} -P ${DB_PORT} ${DB_DATABASE} > ${BACKUP_PATH} || error_exit "Failed to dump database"
+mysqldump ${DB_DATABASE} > ${DB_BACKUP_PATH} || error_exit "Failed to dump database"
 
 # Compress the SQL file into a zip file
-log "Compressing backup file..."
-zip "${BACKUP_PATH}.zip" "${BACKUP_PATH}" || error_exit "Failed to compress backup file"
+log "Compressing database backup file..."
+zip "${DB_BACKUP_PATH}.zip" "${DB_BACKUP_PATH}" || error_exit "Failed to compress database backup file"
 
 # Move the zip file to the backup directory
-log "Moving backup file to ${BACKUP_DIR}..."
-mv "${BACKUP_PATH}.zip" "${BACKUP_DIR}" || error_exit "Failed to move backup file"
+log "Moving database backup file to ${BACKUP_DIR}..."
+mv "${DB_BACKUP_PATH}.zip" "${BACKUP_DIR}" || error_exit "Failed to move database backup file"
 
 # Remove the original SQL file
 log "Removing temporary SQL file..."
-rm "${BACKUP_PATH}" || error_exit "Failed to remove temporary SQL file"
+rm "${DB_BACKUP_PATH}" || error_exit "Failed to remove temporary SQL file"
 
-# Store backups in specific directories
-store_backups
+# Backup the image directory
+log "Starting image directory backup..."
+tar -czf "${IMAGE_BACKUP_PATH}" -C "${IMAGE_DIR}" . || error_exit "Failed to backup image directory"
 
-# Clean up old backups
+# Move the tar.gz file to the backup directory
+log "Moving image backup file to ${BACKUP_DIR}..."
+mv "${IMAGE_BACKUP_PATH}" "${BACKUP_DIR}" || error_exit "Failed to move image backup file"
+
+# Clean up old backups older than 7 days
 cleanup_old_backups
 
 log "Backup completed and stored in ${BACKUP_DIR}"
